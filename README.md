@@ -49,15 +49,14 @@ python generate_words.py deploy
 ```
 
 This automatically:
-1. Opens port 3000 on the server (via `compose.generate.yaml` override)
-2. Copies images to the server (`/root/latinWordOfTheDayBE/src/static/img/`)
-3. Opens an SSH tunnel and uploads only **new** words to production
-4. Closes port 3000 when done
+1. Copies images to the server via SCP (`/root/latinWordOfTheDayBE/src/static/img/`)
+2. Compares local and production words to find new ones
+3. Uploads only **new** words to the production API (port 3000)
 
 Options:
 - `--ssh-host latin` — SSH host alias (default: `latin`)
 - `--server-img-dir /path/to/img` — image directory on the server
-- `--compose-dir /path/to/backend` — Docker Compose directory on the server
+- `--prod-api http://latinwordoftheday.com:3000` — production API URL
 
 ### Full workflow example
 
