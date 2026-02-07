@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Generate Latin words with DALL-E 3 images and upload to the Latin Word of the Day API.
+Generate Latin words with images and upload to the Latin Word of the Day API.
+
+Image sources:
+  dalle   - DALL-E 3 (requires OPENAI_API_KEY, costs money)
+  pixabay - Pixabay stock photos (requires PIXABAY_API_KEY, free)
 
 Modes:
-  generate          - Generate new words (GPT-4o) + images (DALL-E 3) and upload to API
+  generate          - Generate new words (GPT-4o) + images and upload to API
   regenerate-images - Regenerate missing images for words already in the DB
 """
 
@@ -17,38 +21,153 @@ import urllib.error
 from pathlib import Path
 
 OPENAI_API_URL = "https://api.openai.com/v1"
+PIXABAY_API_URL = "https://pixabay.com/api/"
 BATCH_SIZE = 25
 
+# Map Latin words to English search terms for stock photo lookups
+LATIN_TO_ENGLISH = {
+    "aequor": "ocean sea", "aestas": "summer", "agricola": "farmer field",
+    "alacritas": "enthusiasm joy", "alvus": "belly body", "anus": "elderly woman",
+    "arbiter": "judge court", "arx": "fortress citadel", "astrum": "star night sky",
+    "auris": "ear listening", "avis": "bird flying", "bellator": "warrior battle",
+    "caligo": "fog mist dark", "candor": "bright white radiance", "canis": "dog",
+    "cano": "singing song", "carmen": "poem song", "castellum": "castle fortress",
+    "castra": "military camp", "celer": "fast speed running", "cervus": "deer stag",
+    "cibus": "food feast", "cicatrix": "scar wound", "claritas": "clarity brightness",
+    "clarus": "famous bright", "clavis": "key lock", "contemplatio": "meditation contemplation",
+    "dies": "day sunrise", "digitus": "finger hand", "dominus": "lord master",
+    "domum": "home house", "domus": "roman house villa", "dubium": "doubt uncertainty",
+    "duo": "two pair", "equus": "horse galloping", "fatum": "fate destiny",
+    "febris": "fever illness", "ferrum": "iron metal sword", "flamma": "flame fire",
+    "flosculum": "small flower blossom", "fulgur": "lightning bolt", "fulguratio": "lightning storm",
+    "fulmen": "thunderbolt storm", "furca": "fork pitchfork", "furtum": "theft shadow",
+    "galea": "roman helmet armor", "gaudium": "joy happiness celebration",
+    "glacies": "ice glacier frozen", "herba": "herb green plant", "hereditas": "inheritance legacy",
+    "lacerta": "lizard reptile", "lacrima": "tear crying", "libertas": "liberty freedom statue",
+    "locus": "place location landscape", "ludus": "game play sport",
+    "luna": "moon night", "lupus": "wolf", "magnitudo": "greatness mountain grand",
+    "mater": "mother child", "mel": "honey bee", "metus": "fear dark",
+    "mola": "millstone grinding", "mons": "mountain peak", "monstrum": "monster creature",
+    "mundus": "world earth globe", "murmur": "whisper stream water",
+    "nidus": "nest bird eggs", "nimbus": "storm cloud rain", "nubes": "clouds sky",
+    "oblivio": "forgotten ruins ancient", "otium": "leisure relaxation garden",
+    "pavo": "peacock feathers", "paxillus": "wooden stake peg", "pectus": "chest heart",
+    "penna": "feather quill writing", "piscis": "fish underwater", "pluvia": "rain drops",
+    "poeta": "poet writing book", "pons": "bridge river stone", "pugna": "fight battle combat",
+    "rana": "frog pond", "regnum": "kingdom crown castle", "rosa": "rose flower red",
+    "sagacitas": "wisdom owl clever", "sagitta": "arrow archery bow",
+    "sanguis": "blood red", "saxum": "rock boulder stone", "sibilus": "wind whistle breeze",
+    "sol": "sun sunrise golden", "somnium": "dream clouds sleeping",
+    "somnolentia": "sleepy drowsy bed", "sonus": "sound music waves",
+    "speculum": "mirror reflection", "tauri": "bull horns", "tempestas": "storm tempest sea",
+    "umbra": "shadow dark silhouette", "ursus": "bear wild", "valle": "valley green landscape",
+    "velleitas": "wish desire candle", "volucris": "bird flight wings",
+    "voluntas": "will determination path", "vulcanus": "volcano fire eruption",
+    "vultur": "vulture bird prey",
+}
 
-def get_api_key():
-    key = os.environ.get("OPENAI_API_KEY", "")
-    if not key:
+
+def get_env_key(key_name):
+    val = os.environ.get(key_name, "")
+    if not val:
         env_path = Path(__file__).parent / ".env"
         if env_path.exists():
             for line in env_path.read_text().splitlines():
-                if line.startswith("OPENAI_API_KEY="):
-                    key = line.split("=", 1)[1].strip().strip("'\"")
+                if line.startswith(f"{key_name}="):
+                    val = line.split("=", 1)[1].strip().strip("'\"")
+    return val
+
+
+def get_api_key():
+    key = get_env_key("OPENAI_API_KEY")
     if not key:
         print("Error: OPENAI_API_KEY not set. Export it or add to .env file.")
         sys.exit(1)
     return key
 
 
-def openai_request(api_key, endpoint, payload):
+def get_pixabay_key():
+    key = get_env_key("PIXABAY_API_KEY")
+    if not key:
+        print("Error: PIXABAY_API_KEY not set.")
+        print("Get a free key at https://pixabay.com/api/docs/ (no credit card needed)")
+        print("Then add PIXABAY_API_KEY=your-key to .env")
+        sys.exit(1)
+    return key
+
+
+def openai_request(api_key, endpoint, payload, retries=3):
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        f"{OPENAI_API_URL}/{endpoint}",
-        data=data,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
-    resp = urllib.request.urlopen(req, timeout=120)
-    return json.loads(resp.read())
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(
+                f"{OPENAI_API_URL}/{endpoint}",
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp = urllib.request.urlopen(req, timeout=180)
+            return json.loads(resp.read())
+        except Exception as e:
+            if attempt < retries - 1:
+                wait = (attempt + 1) * 10
+                print(f"  Retry {attempt + 1}/{retries} after error: {e}")
+                time.sleep(wait)
+            else:
+                raise
 
 
-def generate_image(api_key, word, output_dir):
+def fetch_pixabay_image(pixabay_key, word, output_dir):
+    """Download a relevant image from Pixabay for a Latin word."""
+    output_path = output_dir / f"{word.lower()}.jpg"
+    if output_path.exists() and output_path.stat().st_size > 1000:
+        print(f"  Image already exists: {output_path.name}")
+        return output_path.name
+
+    search_term = LATIN_TO_ENGLISH.get(word.lower(), word.lower())
+    params = urllib.parse.urlencode({
+        "key": pixabay_key,
+        "q": search_term,
+        "image_type": "photo",
+        "orientation": "horizontal",
+        "min_width": 800,
+        "per_page": 5,
+        "safesearch": "true",
+    })
+    url = f"{PIXABAY_API_URL}?{params}"
+
+    try:
+        resp = urllib.request.urlopen(url, timeout=30)
+        data = json.loads(resp.read())
+        if not data.get("hits"):
+            # Fallback: try just the first word of the search term
+            fallback = search_term.split()[0]
+            params = urllib.parse.urlencode({
+                "key": pixabay_key, "q": fallback, "image_type": "photo",
+                "orientation": "horizontal", "min_width": 800, "per_page": 5,
+                "safesearch": "true",
+            })
+            resp = urllib.request.urlopen(f"{PIXABAY_API_URL}?{params}", timeout=30)
+            data = json.loads(resp.read())
+
+        if not data.get("hits"):
+            print(f"  No Pixabay results for '{search_term}'")
+            return None
+
+        # Use the top result's large image
+        image_url = data["hits"][0]["largeImageURL"]
+        img_data = urllib.request.urlopen(image_url, timeout=60).read()
+        output_path.write_bytes(img_data)
+        print(f"  Downloaded: {output_path.name} ({len(img_data)} bytes) [{search_term}]")
+        return output_path.name
+    except Exception as e:
+        print(f"  ERROR fetching Pixabay image for {word}: {e}")
+        return None
+
+
+def generate_image_dalle(api_key, word, output_dir):
     """Generate a DALL-E 3 image for a Latin word."""
     output_path = output_dir / f"{word.lower()}.jpg"
     if output_path.exists() and output_path.stat().st_size > 1000:
@@ -61,22 +180,27 @@ def generate_image(api_key, word, output_dir):
         f"No text or letters in the image."
     )
 
-    try:
-        result = openai_request(api_key, "images/generations", {
-            "model": "dall-e-3",
-            "prompt": prompt,
-            "n": 1,
-            "size": "1024x1024",
-            "response_format": "url",
-        })
-        image_url = result["data"][0]["url"]
-        img_data = urllib.request.urlopen(image_url, timeout=60).read()
-        output_path.write_bytes(img_data)
-        print(f"  Generated image: {output_path.name} ({len(img_data)} bytes)")
-        return output_path.name
-    except Exception as e:
-        print(f"  ERROR generating image for {word}: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            result = openai_request(api_key, "images/generations", {
+                "model": "dall-e-2",
+                "prompt": prompt,
+                "n": 1,
+                "size": "256x256",
+                "response_format": "url",
+            })
+            image_url = result["data"][0]["url"]
+            img_data = urllib.request.urlopen(image_url, timeout=120).read()
+            output_path.write_bytes(img_data)
+            print(f"  Generated image: {output_path.name} ({len(img_data)} bytes)")
+            return output_path.name
+        except Exception as e:
+            if attempt < 2:
+                print(f"  Retry image {attempt + 1}/3: {e}")
+                time.sleep(10)
+            else:
+                print(f"  ERROR generating image for {word}: {e}")
+                return None
 
 
 def generate_words_batch(api_key, count, exclude_words):
@@ -147,7 +271,9 @@ def cmd_generate(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Get existing words to avoid duplicates
+    if args.image_source == "pixabay":
+        pixabay_key = get_pixabay_key()
+
     existing_images = {f.stem for f in output_dir.iterdir() if f.suffix in ('.jpg', '.jpeg', '.png', '.avif')}
     try:
         existing_words_data = get_existing_words(args.api_url)
@@ -155,9 +281,12 @@ def cmd_generate(args):
     except Exception:
         existing_names = set()
 
-    exclude = existing_images | existing_names
+    # Only exclude actual Latin word names from the GPT prompt (not English image filenames)
+    exclude = set(existing_names)
+    # Track images separately to avoid regenerating existing ones
+    existing_image_stems = set(existing_images)
     print(f"Found {len(existing_images)} existing images, {len(existing_names)} existing words")
-    print(f"Excluding {len(exclude)} words total\n")
+    print(f"Excluding {len(exclude)} Latin words from generation\n")
 
     all_words = []
     remaining = args.count
@@ -167,17 +296,18 @@ def cmd_generate(args):
         print(f"[Batch] Generating {batch} words with GPT-4o...")
 
         words = generate_words_batch(api_key, batch, exclude)
-        # Filter out duplicates
         new_words = [w for w in words if w["word"].lower() not in exclude]
         for w in new_words:
             exclude.add(w["word"].lower())
 
         print(f"  Got {len(new_words)} new words")
 
-        # Generate images
         for w in new_words:
             print(f"\n  Processing: {w['word']}")
-            img = generate_image(api_key, w["word"], output_dir)
+            if args.image_source == "pixabay":
+                img = fetch_pixabay_image(pixabay_key, w["word"], output_dir)
+            else:
+                img = generate_image_dalle(api_key, w["word"], output_dir)
             if img:
                 w["image"] = img
 
@@ -187,7 +317,6 @@ def cmd_generate(args):
         if remaining > 0:
             time.sleep(1)
 
-    # Upload words
     print(f"\nUploading {len(all_words)} words to API...")
     uploaded = 0
     for w in all_words:
@@ -203,18 +332,22 @@ def cmd_generate(args):
 
 def cmd_regenerate_images(args):
     """Regenerate missing images for existing words in the DB."""
-    api_key = get_api_key()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.image_source == "pixabay":
+        pixabay_key = get_pixabay_key()
+        image_fn = lambda word: fetch_pixabay_image(pixabay_key, word, output_dir)
+    else:
+        api_key = get_api_key()
+        image_fn = lambda word: generate_image_dalle(api_key, word, output_dir)
 
     existing_images = {f.name for f in output_dir.iterdir() if f.suffix in ('.jpg', '.jpeg', '.png', '.avif')}
     print(f"Found {len(existing_images)} images on disk")
 
-    # Get all words from API
     words = get_existing_words(args.api_url)
     print(f"Found {len(words)} words in database")
 
-    # Find words with missing images
     missing = []
     for w in words:
         img = w.get("image", "")
@@ -223,7 +356,6 @@ def cmd_regenerate_images(args):
         elif img not in existing_images:
             missing.append(w)
 
-    # Deduplicate by image name
     seen = set()
     unique_missing = []
     for w in missing:
@@ -239,10 +371,9 @@ def cmd_regenerate_images(args):
     for i, w in enumerate(unique_missing, 1):
         word = w["word"]
         print(f"[{i}/{len(unique_missing)}] {word}")
-        img = generate_image(api_key, word, output_dir)
+        img = image_fn(word)
         if img:
             generated += 1
-            # Update word if it had no image field
             if not w.get("image"):
                 try:
                     update_word_image(args.api_url, w["id"], img)
@@ -252,9 +383,8 @@ def cmd_regenerate_images(args):
         else:
             failed += 1
 
-        # Rate limit: DALL-E 3 has limits
         if i % 5 == 0:
-            time.sleep(2)
+            time.sleep(1)
 
     print(f"\nDone! Generated {generated} images, {failed} failed")
 
@@ -265,6 +395,8 @@ def main():
                         help="Backend API URL (default: http://localhost:3000)")
     parser.add_argument("--output-dir", default="./images",
                         help="Directory to save generated images")
+    parser.add_argument("--image-source", choices=["dalle", "pixabay"], default="pixabay",
+                        help="Image source: dalle (paid) or pixabay (free, default)")
 
     sub = parser.add_subparsers(dest="command")
 
