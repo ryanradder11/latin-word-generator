@@ -393,88 +393,52 @@ def cmd_deploy(args):
     """Deploy generated images and words to production.
 
     Workflow:
-    1. SSH tunnel to expose production API on port 3000
-    2. Copy images to server
-    3. Upload words via the production API
-    4. Close the tunnel
+    1. Copy images to server via SCP
+    2. Fetch words from local and production APIs
+    3. Upload new words to production
     """
     import subprocess
-    import shutil
 
     image_dir = Path(args.output_dir)
     ssh_host = args.ssh_host
     server_img_dir = args.server_img_dir
-    compose_dir = args.compose_dir
+    prod_api = args.prod_api
 
-    # Step 1: Open port 3000 on the server
-    print("Opening port 3000 on production server...")
-    subprocess.run(
-        ["ssh", ssh_host, f"cd {compose_dir} && docker compose -f compose.yaml -f compose.generate.yaml up -d server"],
-        check=True,
-    )
-
-    # Step 2: Copy images to server
+    # Step 1: Copy images to server
     images = list(image_dir.glob("*.jpg")) + list(image_dir.glob("*.png"))
     if images:
-        print(f"\nCopying {len(images)} images to server...")
+        print(f"Copying {len(images)} images to server...")
         subprocess.run(
             ["scp", *[str(img) for img in images], f"{ssh_host}:{server_img_dir}/"],
             check=True,
         )
         print(f"  Copied {len(images)} images")
     else:
-        print("\nNo images to copy")
+        print("No images to copy")
 
-    # Step 3: Open SSH tunnel and upload words
-    print("\nOpening SSH tunnel (localhost:3001 -> server:3000)...")
-    tunnel = subprocess.Popen(
-        ["ssh", "-N", "-L", "3001:localhost:3000", ssh_host],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    # Step 2: Compare local and production words
+    print("\nFetching words from local API...")
+    local_words = get_existing_words(args.api_url)
 
-    try:
-        time.sleep(3)  # wait for tunnel to establish
+    print("Fetching words from production API...")
+    prod_words = get_existing_words(prod_api)
+    prod_names = {w["word"].lower() for w in prod_words}
 
-        # Get words from local API
-        print("Fetching words from local API...")
-        local_words = get_existing_words(args.api_url)
+    # Step 3: Upload new words
+    new_words = [w for w in local_words if w["word"].lower() not in prod_names]
+    print(f"Found {len(new_words)} new words to upload")
 
-        # Get words from production API
-        print("Fetching words from production API...")
-        prod_words = get_existing_words("http://localhost:3001")
-        prod_names = {w["word"].lower() for w in prod_words}
+    uploaded = 0
+    for w in new_words:
+        word_data = {k: v for k, v in w.items() if k != "id"}
+        try:
+            upload_word(prod_api, word_data)
+            print(f"  Uploaded: {w['word']}")
+            uploaded += 1
+        except Exception as e:
+            print(f"  ERROR uploading {w['word']}: {e}")
 
-        # Find new words
-        new_words = [w for w in local_words if w["word"].lower() not in prod_names]
-        print(f"Found {len(new_words)} new words to upload")
-
-        # Upload new words
-        uploaded = 0
-        for w in new_words:
-            # Remove id field so production assigns its own
-            word_data = {k: v for k, v in w.items() if k != "id"}
-            try:
-                upload_word("http://localhost:3001", word_data)
-                print(f"  Uploaded: {w['word']}")
-                uploaded += 1
-            except Exception as e:
-                print(f"  ERROR uploading {w['word']}: {e}")
-
-        print(f"\nDone! Uploaded {uploaded}/{len(new_words)} words")
-
-    finally:
-        # Step 4: Close tunnel and revert port
-        print("\nClosing SSH tunnel...")
-        tunnel.terminate()
-        tunnel.wait()
-
-        print("Closing port 3000 on production server...")
-        subprocess.run(
-            ["ssh", ssh_host, f"cd {compose_dir} && docker compose up -d server"],
-            check=True,
-        )
-        print("Port 3000 closed")
+    print(f"\nDone! Uploaded {uploaded}/{len(new_words)} words")
 
 
 def main():
@@ -498,8 +462,8 @@ def main():
                         help="SSH host alias for the server (default: latin)")
     deploy.add_argument("--server-img-dir", default="/root/latinWordOfTheDayBE/src/static/img",
                         help="Image directory on the server")
-    deploy.add_argument("--compose-dir", default="/root/latinWordOfTheDayBE",
-                        help="Docker Compose directory on the server")
+    deploy.add_argument("--prod-api", default="http://latinwordoftheday.com:3000",
+                        help="Production API URL (default: http://latinwordoftheday.com:3000)")
 
     args = parser.parse_args()
 
