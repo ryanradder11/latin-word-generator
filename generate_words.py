@@ -175,9 +175,9 @@ def generate_image_dalle(api_key, word, output_dir):
         return output_path.name
 
     prompt = (
-        f"No text, no letters, no words. "
-        f"An artistic representation of the word '{word}'. "
-        f"Classical Roman aesthetic, warm lighting, painterly style."
+        f"A beautiful painterly illustration of the concept '{word}'. "
+        f"Classical Roman aesthetic, warm lighting. "
+        f"The image contains no written words or letters."
     )
 
     for attempt in range(3):
