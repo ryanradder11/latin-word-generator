@@ -175,9 +175,9 @@ def generate_image_dalle(api_key, word, output_dir):
         return output_path.name
 
     prompt = (
-        f"A beautiful, artistic illustration representing the Latin word '{word}'. "
-        f"Classical Roman aesthetic, warm lighting, painterly style. "
-        f"No text or letters in the image."
+        f"No text, no letters, no words. "
+        f"An artistic representation of the word '{word}'. "
+        f"Classical Roman aesthetic, warm lighting, painterly style."
     )
 
     for attempt in range(3):
@@ -186,7 +186,7 @@ def generate_image_dalle(api_key, word, output_dir):
                 "model": "dall-e-2",
                 "prompt": prompt,
                 "n": 1,
-                "size": "256x256",
+                "size": "512x512",
                 "response_format": "url",
             })
             image_url = result["data"][0]["url"]
