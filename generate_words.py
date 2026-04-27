@@ -175,8 +175,12 @@ def generate_image_dalle(api_key, word, output_dir):
         return output_path.name
 
     prompt = (
-        f"Oil painting of a scene representing the concept '{word}'. "
-        f"Classical Roman aesthetic, warm golden lighting, rich colors, painterly brushstrokes."
+        f'Create an oil painting that teaches the meaning of the Latin word "{word}".\n\n'
+        f'Show one large, central, immediately recognizable subject that represents "{word}". '
+        f'The subject should fill most of the image. Use a simple background and avoid decorative clutter.\n\n'
+        f'Classical Roman aesthetic, ancient Mediterranean atmosphere, warm golden lighting, '
+        f'rich colors, painterly brushstrokes, realistic oil painting texture.\n\n'
+        f'Pure visual scene only. No written elements.'
     )
 
     for attempt in range(3):
@@ -202,10 +206,24 @@ def generate_image_dalle(api_key, word, output_dir):
                 return None
 
 
-def generate_words_batch(api_key, count, exclude_words):
+def generate_words_batch(api_key, count, exclude_words, target_words=None):
     """Generate a batch of Latin words using GPT-4o."""
     exclude_str = ", ".join(sorted(exclude_words)) if exclude_words else "none"
-    prompt = f"""Generate exactly {count} Latin vocabulary words. For each word provide:
+
+    if target_words:
+        available_targets = [w for w in target_words if w.lower() not in exclude_words]
+        batch_targets = available_targets[:count]
+        if batch_targets:
+            target_str = ", ".join(batch_targets)
+            target_instruction = f"Choose words from this target list (in order): {target_str}. If the target list has fewer than {count} words, generate additional classical Latin words freely for the remainder."
+        else:
+            target_instruction = "Generate classical Latin vocabulary words freely."
+    else:
+        target_instruction = "Generate classical Latin vocabulary words freely."
+
+    prompt = f"""Generate exactly {count} Latin vocabulary words. {target_instruction}
+
+For each word provide:
 - word: the Latin word (capitalized)
 - definition: 1-2 sentence English definition starting with "X means..."
 - pronunciation: phonetic pronunciation
@@ -232,13 +250,16 @@ Return valid JSON array only, no markdown."""
     return json.loads(text)
 
 
-def upload_word(api_url, word_data):
+def upload_word(api_url, word_data, api_key=None):
     """Upload a word to the API."""
     data = json.dumps(word_data).encode()
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
     req = urllib.request.Request(
         f"{api_url}/items",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     resp = urllib.request.urlopen(req, timeout=30)
     return json.loads(resp.read())
@@ -251,17 +272,43 @@ def get_existing_words(api_url):
     return json.loads(resp.read())
 
 
-def update_word_image(api_url, word_id, image_name):
+def update_word_image(api_url, word_id, image_name, api_key=None):
     """Update a word's image field via the API."""
     data = json.dumps({"image": image_name}).encode()
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
     req = urllib.request.Request(
         f"{api_url}/items/{word_id}",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="PUT",
     )
     resp = urllib.request.urlopen(req, timeout=30)
     return json.loads(resp.read())
+
+
+def word_to_sql(w):
+    """Convert a word dict to an idempotent INSERT SQL statement."""
+    def esc(s):
+        return str(s or "").replace("'", "''")
+
+    synonyms = "{" + ",".join(w.get("synonyms") or []) + "}"
+    antonyms = "{" + ",".join(w.get("antonyms") or []) + "}"
+    word = w["word"]
+    return (
+        f"INSERT INTO word_of_the_day "
+        f"(word, definition, pronunciation, origin, "
+        f"example0, example0_latin, example1, example1_latin, example2, example2_latin, "
+        f"synonyms, antonyms, image)\n"
+        f"SELECT '{esc(word)}', '{esc(w.get('definition',''))}', "
+        f"'{esc(w.get('pronunciation',''))}', '{esc(w.get('origin',''))}', "
+        f"'{esc(w.get('example0',''))}', '{esc(w.get('example0_latin',''))}', "
+        f"'{esc(w.get('example1',''))}', '{esc(w.get('example1_latin',''))}', "
+        f"'{esc(w.get('example2',''))}', '{esc(w.get('example2_latin',''))}', "
+        f"'{synonyms}', '{antonyms}', '{esc(w.get('image',''))}'\n"
+        f"WHERE NOT EXISTS (SELECT 1 FROM word_of_the_day WHERE LOWER(word) = LOWER('{esc(word)}'));"
+    )
 
 
 def cmd_generate(args):
@@ -273,6 +320,11 @@ def cmd_generate(args):
     if args.image_source == "pixabay":
         pixabay_key = get_pixabay_key()
 
+    target_words = None
+    if getattr(args, 'target_words', None):
+        target_words = [w.strip() for w in args.target_words.split(",") if w.strip()]
+        print(f"Targeting {len(target_words)} specific words")
+
     existing_images = {f.stem for f in output_dir.iterdir() if f.suffix in ('.jpg', '.jpeg', '.png', '.avif')}
     try:
         existing_words_data = get_existing_words(args.api_url)
@@ -280,24 +332,31 @@ def cmd_generate(args):
     except Exception:
         existing_names = set()
 
-    # Only exclude actual Latin word names from the GPT prompt (not English image filenames)
     exclude = set(existing_names)
-    # Track images separately to avoid regenerating existing ones
-    existing_image_stems = set(existing_images)
     print(f"Found {len(existing_images)} existing images, {len(existing_names)} existing words")
     print(f"Excluding {len(exclude)} Latin words from generation\n")
 
+    save_migration = getattr(args, 'save_migration', None)
     all_words = []
     remaining = args.count
 
+    # Track which targets have been used so we advance the list each batch
+    targets_used = set()
+
     while remaining > 0:
         batch = min(remaining, BATCH_SIZE)
-        print(f"[Batch] Generating {batch} words with GPT-4o...")
 
-        words = generate_words_batch(api_key, batch, exclude)
+        remaining_targets = None
+        if target_words:
+            remaining_targets = [w for w in target_words if w.lower() not in exclude and w.lower() not in targets_used]
+
+        print(f"[Batch] Generating {batch} words with GPT-4o...")
+        words = generate_words_batch(api_key, batch, exclude, target_words=remaining_targets)
         new_words = [w for w in words if w["word"].lower() not in exclude]
         for w in new_words:
             exclude.add(w["word"].lower())
+            if target_words:
+                targets_used.add(w["word"].lower())
 
         print(f"  Got {len(new_words)} new words")
 
@@ -316,17 +375,26 @@ def cmd_generate(args):
         if remaining > 0:
             time.sleep(1)
 
-    print(f"\nUploading {len(all_words)} words to API...")
-    uploaded = 0
-    for w in all_words:
-        try:
-            upload_word(args.api_url, w)
-            print(f"  Uploaded: {w['word']}")
-            uploaded += 1
-        except Exception as e:
-            print(f"  ERROR uploading {w['word']}: {e}")
-
-    print(f"\nDone! Uploaded {uploaded}/{len(all_words)} words")
+    if save_migration:
+        migration_path = Path(save_migration)
+        migration_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(migration_path, "w") as f:
+            f.write(f"-- Insert {len(all_words)} new generated words\n\n")
+            for w in all_words:
+                f.write(word_to_sql(w))
+                f.write("\n")
+        print(f"\nMigration written to: {migration_path}")
+    else:
+        print(f"\nUploading {len(all_words)} words to API...")
+        uploaded = 0
+        for w in all_words:
+            try:
+                upload_word(args.api_url, w, api_key=getattr(args, 'api_key', None))
+                print(f"  Uploaded: {w['word']}")
+                uploaded += 1
+            except Exception as e:
+                print(f"  ERROR uploading {w['word']}: {e}")
+        print(f"\nDone! Uploaded {uploaded}/{len(all_words)} words")
 
 
 def cmd_regenerate_images(args):
@@ -375,7 +443,7 @@ def cmd_regenerate_images(args):
             generated += 1
             if not w.get("image"):
                 try:
-                    update_word_image(args.api_url, w["id"], img)
+                    update_word_image(args.api_url, w["id"], img, api_key=getattr(args, 'api_key', None))
                     print(f"  Updated DB image field for {word}")
                 except Exception as e:
                     print(f"  Warning: couldn't update DB for {word}: {e}")
@@ -431,7 +499,7 @@ def cmd_deploy(args):
     for w in new_words:
         word_data = {k: v for k, v in w.items() if k != "id"}
         try:
-            upload_word(prod_api, word_data)
+            upload_word(prod_api, word_data, api_key=getattr(args, 'api_key', None))
             print(f"  Uploaded: {w['word']}")
             uploaded += 1
         except Exception as e:
@@ -448,11 +516,17 @@ def main():
                         help="Directory to save generated images")
     parser.add_argument("--image-source", choices=["dalle", "pixabay"], default="pixabay",
                         help="Image source: dalle (paid) or pixabay (free, default)")
+    parser.add_argument("--api-key", default=None,
+                        help="API key for authenticated write endpoints")
 
     sub = parser.add_subparsers(dest="command")
 
     gen = sub.add_parser("generate", help="Generate new words with images")
     gen.add_argument("--count", type=int, default=25, help="Number of words to generate")
+    gen.add_argument("--target-words", default=None,
+                     help="Comma-separated list of Latin words for GPT-4o to prioritise")
+    gen.add_argument("--save-migration", default=None, metavar="PATH",
+                     help="Write SQL migration to PATH instead of uploading to API")
 
     sub.add_parser("regenerate-images", help="Regenerate missing images for existing DB words")
 
