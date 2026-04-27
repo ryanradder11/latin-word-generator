@@ -175,8 +175,12 @@ def generate_image_dalle(api_key, word, output_dir):
         return output_path.name
 
     prompt = (
-        f"Oil painting of a scene representing the concept '{word}'. "
-        f"Classical Roman aesthetic, warm golden lighting, rich colors, painterly brushstrokes."
+        f'Create an oil painting that teaches the meaning of the Latin word "{word}".\n\n'
+        f'Show one large, central, immediately recognizable subject that represents "{word}". '
+        f'The subject should fill most of the image. Use a simple background and avoid decorative clutter.\n\n'
+        f'Classical Roman aesthetic, ancient Mediterranean atmosphere, warm golden lighting, '
+        f'rich colors, painterly brushstrokes, realistic oil painting texture.\n\n'
+        f'Pure visual scene only. No written elements.'
     )
 
     for attempt in range(3):
