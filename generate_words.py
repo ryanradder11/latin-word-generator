@@ -460,30 +460,50 @@ def cmd_deploy(args):
     """Deploy generated images and words to production.
 
     Workflow:
-    1. Copy images to server via SCP
-    2. Fetch words from local and production APIs
-    3. Upload new words to production
+    1. Verify all images in the backend repo are committed and pushed
+    2. SSH to the server and run git pull + docker rebuild
+    3. Fetch words from local and production APIs
+    4. Upload new words to production
     """
     import subprocess
 
-    image_dir = Path(args.output_dir)
     ssh_host = args.ssh_host
-    server_img_dir = args.server_img_dir
     prod_api = args.prod_api
 
-    # Step 1: Copy images to server
-    images = list(image_dir.glob("*.jpg")) + list(image_dir.glob("*.png"))
-    if images:
-        print(f"Copying {len(images)} images to server...")
-        subprocess.run(
-            ["scp", *[str(img) for img in images], f"{ssh_host}:{server_img_dir}/"],
-            check=True,
-        )
-        print(f"  Copied {len(images)} images")
-    else:
-        print("No images to copy")
+    # Step 1: Verify images are committed in latinWordOfTheDayBe (git is the source of truth)
+    be_repo = Path(__file__).resolve().parent.parent / "latinWordOfTheDayBe"
+    if not be_repo.exists():
+        print(f"ERROR: backend repo not found at {be_repo}")
+        raise SystemExit(1)
 
-    # Step 2: Compare local and production words
+    status = subprocess.run(
+        ["git", "-C", str(be_repo), "status", "--porcelain", "src/static/img/"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if status:
+        print("ERROR: uncommitted changes in latinWordOfTheDayBe/src/static/img/")
+        print("Commit and push them to main before running deploy.\n")
+        print(status)
+        raise SystemExit(1)
+
+    unpushed = subprocess.run(
+        ["git", "-C", str(be_repo), "log", "origin/main..HEAD", "--oneline", "--", "src/static/img/"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if unpushed:
+        print("ERROR: image commits ahead of origin/main. Push to main before deploying:\n")
+        print(unpushed)
+        raise SystemExit(1)
+
+    # Step 2: SSH to server, pull main, rebuild web container
+    print("Pulling latest images on prod and rebuilding web container...")
+    subprocess.run(
+        ["ssh", ssh_host,
+         "cd /root/latinWordOfTheDayBE && git pull origin main && docker compose up -d --build web"],
+        check=True,
+    )
+
+    # Step 3: Compare local and production words
     print("\nFetching words from local API...")
     local_words = get_existing_words(args.api_url)
 
@@ -530,11 +550,11 @@ def main():
 
     sub.add_parser("regenerate-images", help="Regenerate missing images for existing DB words")
 
-    deploy = sub.add_parser("deploy", help="Deploy new words and images to production")
+    deploy = sub.add_parser("deploy",
+                            help="Deploy new words and images to production. "
+                                 "Images must be committed and pushed to main in latinWordOfTheDayBe first.")
     deploy.add_argument("--ssh-host", default="latin",
                         help="SSH host alias for the server (default: latin)")
-    deploy.add_argument("--server-img-dir", default="/root/latinWordOfTheDayBE/src/static/img",
-                        help="Image directory on the server")
     deploy.add_argument("--prod-api", default="http://latinwordoftheday.com:3000",
                         help="Production API URL (default: http://latinwordoftheday.com:3000)")
 
