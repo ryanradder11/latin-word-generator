@@ -457,18 +457,20 @@ def cmd_regenerate_images(args):
 
 
 def cmd_deploy(args):
-    """Deploy generated images and words to production.
+    """Deploy generated images to production.
 
     Workflow:
-    1. Verify all images in the backend repo are committed and pushed
-    2. SSH to the server and run git pull + docker rebuild
-    3. Fetch words from local and production APIs
-    4. Upload new words to production
+    1. Verify images in latinWordOfTheDayBe are committed and pushed to main.
+    2. SSH to the server and run git pull + docker rebuild.
+
+    Word data is delivered via SQL migration files in
+    latinWordOfTheDayBe/src/migrations/V*.sql, which run automatically
+    on server container startup. Generate them locally with:
+        python generate_words.py generate --save-migration <path> --count N
     """
     import subprocess
 
     ssh_host = args.ssh_host
-    prod_api = args.prod_api
 
     # Step 1: Verify images are committed in latinWordOfTheDayBe (git is the source of truth)
     be_repo = Path(__file__).resolve().parent.parent / "latinWordOfTheDayBe"
@@ -503,30 +505,6 @@ def cmd_deploy(args):
         check=True,
     )
 
-    # Step 3: Compare local and production words
-    print("\nFetching words from local API...")
-    local_words = get_existing_words(args.api_url)
-
-    print("Fetching words from production API...")
-    prod_words = get_existing_words(prod_api)
-    prod_names = {w["word"].lower() for w in prod_words}
-
-    # Step 3: Upload new words
-    new_words = [w for w in local_words if w["word"].lower() not in prod_names]
-    print(f"Found {len(new_words)} new words to upload")
-
-    uploaded = 0
-    for w in new_words:
-        word_data = {k: v for k, v in w.items() if k != "id"}
-        try:
-            upload_word(prod_api, word_data, api_key=getattr(args, 'api_key', None))
-            print(f"  Uploaded: {w['word']}")
-            uploaded += 1
-        except Exception as e:
-            print(f"  ERROR uploading {w['word']}: {e}")
-
-    print(f"\nDone! Uploaded {uploaded}/{len(new_words)} words")
-
 
 def main():
     parser = argparse.ArgumentParser(description="Latin Word of the Day generator")
@@ -551,12 +529,11 @@ def main():
     sub.add_parser("regenerate-images", help="Regenerate missing images for existing DB words")
 
     deploy = sub.add_parser("deploy",
-                            help="Deploy new words and images to production. "
-                                 "Images must be committed and pushed to main in latinWordOfTheDayBe first.")
+                            help="Deploy generated images to production. "
+                                 "Images must be committed and pushed to main in latinWordOfTheDayBe first. "
+                                 "Word data ships separately via SQL migrations in src/migrations/V*.sql.")
     deploy.add_argument("--ssh-host", default="latin",
                         help="SSH host alias for the server (default: latin)")
-    deploy.add_argument("--prod-api", default="http://latinwordoftheday.com:3000",
-                        help="Production API URL (default: http://latinwordoftheday.com:3000)")
 
     args = parser.parse_args()
 
